@@ -126,9 +126,7 @@ jobs:
           # 运行注册脚本
           node twitch/register.js \
             --workers ${{ inputs.workers }} \
-            --frontend-ip ${{ inputs.frontend_ip }} \
-            --browser "$CLOAK_BROWSER" \
-            --headless
+            --frontend-ip ${{ inputs.frontend_ip }}
           
           EXIT_CODE=$?
           echo "============================================"
