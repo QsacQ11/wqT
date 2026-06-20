@@ -1,0 +1,139 @@
+name: Twitch Auto Register
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_count:
+        description: 'job数量'
+        required: true
+        default: '10'
+        type: number
+      workers:
+        description: '每个作业内的注册线程数'
+        required: true
+        default: '3'
+        type: string
+      frontend_ip:
+        description: '前端API服务器IP地址'
+        required: true
+        default: '64.81.112.97'
+        type: string
+
+jobs:
+  # 生成动态job索引
+  generate-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          # 生成从1到job_count的数组
+          JOBS=$(seq 1 ${{ inputs.job_count }} | jq -R -s -c 'split("\n")[:-1] | map(tonumber)')
+          echo "matrix={\"job_index\":$JOBS}" >> $GITHUB_OUTPUT
+
+  register:
+    name: '注册作业 #${{ matrix.job_index }}'
+    runs-on: windows-latest
+    needs: generate-matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
+    
+    steps:
+      # ── 0. 掩码敏感数据 ─────────────────────────────────────────────
+      - name: 掩码敏感环境变量
+        shell: bash
+        run: |
+          echo "::add-mask::${{ secrets.PRIVATE_REPO_ACCESS_KEY }}"
+
+      # ── 1. 拉取私人仓库脚本 ─────────────────────────────────────────
+      - name: 克隆私人仓库
+        shell: bash
+        run: |
+          PRIVATE_REPO="https://github.com/xbox-cn/New_Tw_Auto_Reg.git"
+          echo ">>> 正在拉取脚本仓库..."
+          git clone "https://x-access-token:${{ secrets.PRIVATE_REPO_ACCESS_KEY }}@${PRIVATE_REPO#https://}" private-repo
+          echo ">>> 脚本仓库拉取完成"
+          echo "PRIVATE_REPO_DIR=$(pwd)/private-repo" >> $GITHUB_ENV
+
+      # ── 2. 安装 Node.js ─────────────────────────────────────────────
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ── 3. 安装依赖 ─────────────────────────────────────────────────
+      - name: 安装 npm 依赖
+        shell: bash
+        working-directory: private-repo
+        run: |
+          echo ">>> 安装依赖（跳过 Playwright 浏览器下载）..."
+          export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+          npm install --no-audit --no-fund
+          echo ">>> 依赖安装完成"
+
+      # ── 4. 下载并解压 CloakBrowser ──────────────────────────────────
+      - name: 下载 CloakBrowser
+        shell: bash
+        working-directory: private-repo
+        run: |
+          CLOAK_DIR="$PWD/cloakbrowser"
+          if [ -f "$CLOAK_DIR/chrome.exe" ]; then
+            echo ">>> CloakBrowser 已存在，跳过下载"
+          else
+            echo ">>> 正在下载 CloakBrowser..."
+            # 使用 GitHub CLI 从 Releases 下载
+            DOWNLOAD_URL=$(gh release view --repo CloakHQ/CloakBrowser --json assets --jq ".assets[] | select(.name==\"cloakbrowser-windows-x64.zip\") | .url")
+            
+            if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+              echo "::warning::无法获取 CloakBrowser 下载链接"
+              exit 1
+            fi
+            
+            curl -sL -o cloakbrowser.zip "$DOWNLOAD_URL"
+            echo ">>> 下载完成，正在解压..."
+            mkdir -p "$CLOAK_DIR"
+            unzip -qo cloakbrowser.zip -d cloakbrowser_tmp
+            # 找到 chrome.exe 所在目录并移动文件
+            find cloakbrowser_tmp -name "chrome.exe" -type f | while read -r chrome_path; do
+              chrome_dir=$(dirname "$chrome_path")
+              mv "$chrome_dir"/* "$CLOAK_DIR/" 2>/dev/null || true
+              break
+            done
+            rm -rf cloakbrowser_tmp cloakbrowser.zip
+            echo ">>> CloakBrowser 准备完成"
+          fi
+          
+          # 设置环境变量
+          echo "CLOAK_BROWSER=$CLOAK_DIR/chrome.exe" >> $GITHUB_ENV
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_KEY }}
+
+      # ── 5. 执行注册脚本 ─────────────────────────────────────────────
+      - name: 运行 Twitch 注册（作业 ${{ matrix.job_index }}）
+        shell: bash
+        working-directory: private-repo
+        timeout-minutes: 360
+        run: |
+          echo "============================================"
+          echo "  Twitch 注册 — 作业 #${{ matrix.job_index }} / ${{ inputs.job_count }}"
+          echo "  线程数: ${{ inputs.workers }}"
+          echo "  前端IP: ${{ inputs.frontend_ip }}"
+          echo "  开始时间: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "============================================"
+          
+          # 运行注册脚本
+          node twitch/register.js \
+            --workers ${{ inputs.workers }} \
+            --frontend-ip ${{ inputs.frontend_ip }} \
+            --browser "$CLOAK_BROWSER" \
+            --headless
+          
+          EXIT_CODE=$?
+          echo "============================================"
+          echo "  作业 #${{ matrix.job_index }} 结束"
+          echo "  退出码: ${EXIT_CODE}"
+          echo "  结束时间: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "============================================"
+          exit ${EXIT_CODE}
