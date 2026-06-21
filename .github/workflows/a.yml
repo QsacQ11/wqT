@@ -1,5 +1,4 @@
 name: Twitch Auto Register
-# 三层反检测: rebrowser-playwright-core (CDP层) + CloakBrowser (C++层) + 预热Profile (浏览状态层)
 
 on:
   workflow_dispatch:
@@ -111,10 +110,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_KEY }}
 
-      # ── 5. 预热浏览器 Profile ─────────────────────────────────────
-      # 在 CloakBrowser 中真实浏览 Twitch（首页→分类→注册页）并保存
-      # cookies/localStorage/缓存/Service Worker，使每个后续注册线程
-      # 都携带"真实用户曾浏览过 Twitch"的信号。
       - name: 预热浏览器 Profile
         shell: bash
         working-directory: private-repo
