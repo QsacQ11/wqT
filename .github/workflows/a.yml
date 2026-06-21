@@ -1,4 +1,5 @@
 name: Twitch Auto Register
+# 三层反检测: rebrowser-playwright-core (CDP层) + CloakBrowser (C++层) + 预热Profile (浏览状态层)
 
 on:
   workflow_dispatch:
@@ -68,7 +69,7 @@ jobs:
         shell: bash
         working-directory: private-repo
         run: |
-          echo ">>> 安装依赖（跳过 Playwright 浏览器下载）..."
+          echo ">>> 安装依赖（rebrowser-playwright-core + 跳过浏览器下载）..."
           export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
           npm install --no-audit --no-fund
           echo ">>> 依赖安装完成"
@@ -110,7 +111,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_KEY }}
 
-      # ── 5. 执行注册脚本 ─────────────────────────────────────────────
+      # ── 5. 预热浏览器 Profile ─────────────────────────────────────
+      # 在 CloakBrowser 中真实浏览 Twitch（首页→分类→注册页）并保存
+      # cookies/localStorage/缓存/Service Worker，使每个后续注册线程
+      # 都携带"真实用户曾浏览过 Twitch"的信号。
+      - name: 预热浏览器 Profile
+        shell: bash
+        working-directory: private-repo
+        timeout-minutes: 5
+        run: |
+          echo ">>> 正在预热浏览器 Profile（浏览 Twitch 建立真实用户足迹）..."
+          node twitch/create_profile.js
+          echo ">>> Profile 预热完成"
+
+      # ── 6. 执行注册脚本 ─────────────────────────────────────────────
       - name: 运行 Twitch 注册（作业 ${{ matrix.job_index }}）
         shell: bash
         working-directory: private-repo
