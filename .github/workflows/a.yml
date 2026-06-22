@@ -1,146 +1,94 @@
-name: Twitch Auto Register
+name: Twitch Register
 
 on:
   workflow_dispatch:
     inputs:
-      job_count:
-        description: 'job数量'
-        required: true
-        default: '10'
-        type: number
-      workers:
-        description: '每个作业内的注册线程数'
-        required: true
-        default: '3'
-        type: string
-      frontend_ip:
-        description: '前端API服务器IP地址'
+      server_ip:
+        description: '挂宝服务器 IP（只需填 IP，脚本自动拼 http://IP:5000）'
         required: true
         default: '64.81.112.97'
         type: string
+      job_count:
+        description: '启动的 job 数量（1-256，每 job 各注册 45 个账号）'
+        required: true
+        default: '3'
+        type: string
 
 jobs:
-  # 生成动态job索引
-  generate-matrix:
+  # 预处理：用 Python 生成 matrix JSON
+  prepare:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      job_list: ${{ steps.gen.outputs.job_list }}
     steps:
-      - id: set-matrix
+      - name: Generate job list
+        id: gen
+        shell: bash
+        env:
+          JOB_COUNT: ${{ github.event.inputs.job_count || '3' }}
         run: |
-          # 生成从1到job_count的数组
-          JOBS=$(seq 1 ${{ inputs.job_count }} | jq -R -s -c 'split("\n")[:-1] | map(tonumber)')
-          echo "matrix={\"job_index\":$JOBS}" >> $GITHUB_OUTPUT
+          python3 -c "
+          import json, os
+          n = max(1, min(256, int(os.environ['JOB_COUNT'])))
+          arr = [f'job-{i}' for i in range(n)]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('job_list=' + json.dumps(arr) + chr(10))
+          print('job_list=' + json.dumps(arr))
+          "
 
+  # 实际注册：matrix 并行，每个 job 内部 3 worker × 15 = 45 个账号
   register:
-    name: '注册作业 #${{ matrix.job_index }}'
+    needs: prepare
     runs-on: windows-latest
-    needs: generate-matrix
+    timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
-    
+      max-parallel: 256
+      matrix:
+        job_index: ${{ fromJSON(needs.prepare.outputs.job_list) }}
+
     steps:
-      # ── 0. 掩码敏感数据 ─────────────────────────────────────────────
-      - name: 掩码敏感环境变量
-        shell: bash
-        run: |
-          echo "::add-mask::${{ secrets.PRIVATE_REPO_ACCESS_KEY }}"
+      - name: Checkout public repo (this)
+        uses: actions/checkout@v4
 
-      # ── 1. 拉取私人仓库脚本 ─────────────────────────────────────────
-      - name: 克隆私人仓库
-        shell: bash
-        run: |
-          PRIVATE_REPO="https://github.com/xbox-cn/New_Tw_Auto_Reg.git"
-          echo ">>> 正在拉取脚本仓库..."
-          git clone "https://x-access-token:${{ secrets.PRIVATE_REPO_ACCESS_KEY }}@${PRIVATE_REPO#https://}" private-repo
-          echo ">>> 脚本仓库拉取完成"
-          echo "PRIVATE_REPO_DIR=$(pwd)/private-repo" >> $GITHUB_ENV
-
-      # ── 2. 安装 Node.js ─────────────────────────────────────────────
-      - name: 安装 Node.js
-        uses: actions/setup-node@v4
+      - name: Checkout private source repo
+        uses: actions/checkout@v4
         with:
-          node-version: '20'
+          repository: xbox-cn/New_Tw_Auto_Reg
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_KEY }}
+          path: src
 
-      # ── 3. 安装依赖 ─────────────────────────────────────────────────
-      - name: 安装 npm 依赖
-        shell: bash
-        working-directory: private-repo
-        run: |
-          echo ">>> 安装依赖（rebrowser-playwright-core + 跳过浏览器下载）..."
-          export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-          npm install --no-audit --no-fund
-          echo ">>> 依赖安装完成"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      # ── 4. 下载并解压 CloakBrowser ──────────────────────────────────
-      - name: 下载 CloakBrowser
-        shell: bash
-        working-directory: private-repo
+      - name: Install dependencies
+        shell: pwsh
         run: |
-          CLOAK_DIR="$PWD/cloakbrowser"
-          if [ -f "$CLOAK_DIR/chrome.exe" ]; then
-            echo ">>> CloakBrowser 已存在，跳过下载"
-          else
-            echo ">>> 正在下载 CloakBrowser..."
-            # 使用 GitHub CLI 从 Releases 下载
-            DOWNLOAD_URL=$(gh release view --repo CloakHQ/CloakBrowser --json assets --jq ".assets[] | select(.name==\"cloakbrowser-windows-x64.zip\") | .url")
-            
-            if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-              echo "::warning::无法获取 CloakBrowser 下载链接"
-              exit 1
-            fi
-            
-            curl -sL -o cloakbrowser.zip "$DOWNLOAD_URL"
-            echo ">>> 下载完成，正在解压..."
-            mkdir -p "$CLOAK_DIR"
-            unzip -qo cloakbrowser.zip -d cloakbrowser_tmp
-            # 找到 chrome.exe 所在目录并移动文件
-            find cloakbrowser_tmp -name "chrome.exe" -type f | while read -r chrome_path; do
-              chrome_dir=$(dirname "$chrome_path")
-              mv "$chrome_dir"/* "$CLOAK_DIR/" 2>/dev/null || true
-              break
-            done
-            rm -rf cloakbrowser_tmp cloakbrowser.zip
-            echo ">>> CloakBrowser 准备完成"
-          fi
-          
-          # 设置环境变量
-          echo "CLOAK_BROWSER=$CLOAK_DIR/chrome.exe" >> $GITHUB_ENV
+          python -m pip install --upgrade pip
+          pip install -r src/requirements.txt
+
+      - name: Download CloakBrowser binary
+        shell: pwsh
+        run: |
+          Write-Host "Downloading CloakBrowser chromium binary..."
+          python -m cloakbrowser install
+          Write-Host "--- Verifying chrome.exe ---"
+          $exe = python -c "import sys; sys.path.insert(0,'src'); from config_helpers import resolve_chrome_executable; print(resolve_chrome_executable())"
+          Write-Host "chrome.exe path: $exe"
+          if (-not (Test-Path $exe)) { throw "chrome.exe not found at $exe" }
+          Write-Host "CloakBrowser ready."
+
+      - name: Run registration (job ${{ matrix.job_index }})
+        shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_KEY }}
-
-      - name: 预热浏览器 Profile
-        shell: bash
-        working-directory: private-repo
-        timeout-minutes: 5
+          NO_HEADLESS: 'true'
+          PYTHONUTF8: '1'
+          JOB_INDEX: ${{ matrix.job_index }}
+          SERVER_IP: ${{ github.event.inputs.server_ip || '64.81.112.97' }}
         run: |
-          echo ">>> 正在预热浏览器 Profile（浏览 Twitch 建立真实用户足迹）..."
-          node twitch/create_profile.js
-          echo ">>> Profile 预热完成"
-
-      # ── 6. 执行注册脚本 ─────────────────────────────────────────────
-      - name: 运行 Twitch 注册（作业 ${{ matrix.job_index }}）
-        shell: bash
-        working-directory: private-repo
-        timeout-minutes: 360
-        run: |
-          echo "============================================"
-          echo "  Twitch 注册 — 作业 #${{ matrix.job_index }} / ${{ inputs.job_count }}"
-          echo "  线程数: ${{ inputs.workers }}"
-          echo "  前端IP: ${{ inputs.frontend_ip }}"
-          echo "  开始时间: $(date '+%Y-%m-%d %H:%M:%S')"
-          echo "============================================"
-          
-          # 运行注册脚本
-          node twitch/register.js \
-            --workers ${{ inputs.workers }} \
-            --frontend-ip ${{ inputs.frontend_ip }}
-          
-          EXIT_CODE=$?
-          echo "============================================"
-          echo "  作业 #${{ matrix.job_index }} 结束"
-          echo "  退出码: ${EXIT_CODE}"
-          echo "  结束时间: $(date '+%Y-%m-%d %H:%M:%S')"
-          echo "============================================"
-          exit ${EXIT_CODE}
+          Write-Host "=== Job ${{ matrix.job_index }}: 3 worker 并发，每 worker 15 个，共 45 个账号 ==="
+          Write-Host "=== 上传到 http://${{ github.event.inputs.server_ip || '64.81.112.97' }}:5000 ==="
+          cd src
+          python run.py
