@@ -6,7 +6,7 @@ on:
       server_ip:
         description: '挂宝服务器 IP（只需填 IP，脚本自动拼 http://IP:5000）'
         required: true
-        default: '64.81.112.97'
+        default: '198.44.182.20'
         type: string
       job_count:
         description: '启动的 job 数量（1-256，每 job 各注册 45 个账号）'
@@ -48,6 +48,22 @@ jobs:
         job_index: ${{ fromJSON(needs.prepare.outputs.job_list) }}
 
     steps:
+      - name: Check blacklist IP
+        shell: pwsh
+        run: |
+          $IP = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing -TimeoutSec 10).Content.Trim()
+          Write-Host "Runner public IP: $IP"
+          try {
+            $result = Invoke-WebRequest -Uri "https://api.olsbvgq.shop/check?ip=$IP" -UseBasicParsing -TimeoutSec 10 | ConvertFrom-Json
+            if ($result.blocked -eq $true) {
+              Write-Host "##[error]IP $IP 在黑名单中，跳过此 job"
+              exit 1
+            }
+            Write-Host "IP $IP 正常，继续执行"
+          } catch {
+            Write-Host "##[warning]黑名单查询失败（网络错误），默认放行继续执行"
+          }
+
       - name: Checkout public repo (this)
         uses: actions/checkout@v4
 
